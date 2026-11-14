@@ -4024,8 +4024,8 @@ function cutTechOf(ov, k) {
 
 /* 全体カメラ (2.5D 視差) のキーフレーム生成: セクション境界 (scheme の変化・間奏
    カット) と、18 秒以上キーが空く区間に置く。補間は Renderer 側の J.gcamAt が
-   plan + t の純関数として行う。値の上限 (パン ±3% / ズーム 1.08 / 回転 ±1°) は
-   gcamAt 側でもクランプされる。専用 rng を使うのでパーツ抽選のストリームは乱れない。
+   plan + t の純関数として行う。値の上限 (パン x ±10% / y ±7% / ズーム 0.97–1.22 /
+   回転 ±2.5°) は gcamAt 側でもクランプされる。専用 rng を使うのでパーツ抽選のストリームは乱れない。
    量は project.fx.gcam (0..1) が plan.gcam.strength になる。 */
 function buildGcam(plan) {
   const W = plan.W, H = plan.H;
@@ -4035,10 +4035,10 @@ function buildGcam(plan) {
     if (keys.length && t <= keys[keys.length - 1].t + 0.05) return;
     keys.push({
       t,
-      x: rng.range(-0.026, 0.026) * W,
-      y: rng.range(-0.018, 0.018) * H,
-      s: rng.range(1.015, 1.07),
-      rot: rng.range(-0.8, 0.8),
+      x: rng.range(-0.095, 0.095) * W,
+      y: rng.range(-0.065, 0.065) * H,
+      s: rng.range(1.02, 1.20),
+      rot: rng.range(-2.3, 2.3),
     });
   };
   push(0);
@@ -4982,11 +4982,11 @@ const E = J.E;
    全体カメラ (global camera / 2.5D 視差)
    plan.gcam = { keys: [{t, x, y, s, rot}...], strength } を絶対時刻 t で補間する純関数。
    カットカメラ (cam: env.lt 駆動・カット境界でリセット) とは別軸で、カットを跨いで
-   連続する低周波・小振幅の動きだけを担う。設計上限はここで一元的にクランプする:
-     パン ±3% (画面寸法比) / ズーム 1.00–1.08 / 回転 ±1°
+   連続する低周波の動きを担う。設計上限はここで一元的にクランプする:
+     パン x ±10% / y ±7% (画面寸法比) / ズーム 0.97–1.22 / 回転 ±2.5°
    GCAM_GAIN は全体の効きを切り替える定数 (0 = 全体カメラ無効)。
    plan.gcam が無いプラン (パーツプレビュー用プラン等) には、plan の長さとシード
-   から決まる穏やかなデフォルトドリフトを返す (plan + t のみで決まる決定的動作)。
+   から決まるデフォルトドリフトを返す (plan + t のみで決まる決定的動作)。
    ============================================================ */
 const GCAM_GAIN = 1;
 const GCAM_ZERO = { x: 0, y: 0, s: 1, rot: 0 };
@@ -5000,10 +5000,10 @@ function gcamDefaultKeys(plan) {
   for (let i = 0; i <= n; i++) {
     keys.push({
       t: dur * i / n,
-      x: J.rs(seed, i, 1) * 0.02 * plan.W,
-      y: J.rs(seed, i, 2) * 0.014 * plan.H,
-      s: 1.03 + J.r(seed, i, 3) * 0.03,
-      rot: J.rs(seed, i, 4) * 0.5,
+      x: J.rs(seed, i, 1) * 0.09 * plan.W,
+      y: J.rs(seed, i, 2) * 0.06 * plan.H,
+      s: 1.02 + J.r(seed, i, 3) * 0.18,
+      rot: J.rs(seed, i, 4) * 2.3,
     });
   }
   return keys;
@@ -5025,10 +5025,10 @@ function gcamAt(plan, t) {
   if (st <= 0) return GCAM_ZERO;
   const W = plan.W, H = plan.H;
   return {
-    x: J.clamp(J.lerp(a.x, b.x, k) * st, -0.03 * W, 0.03 * W),
-    y: J.clamp(J.lerp(a.y, b.y, k) * st, -0.03 * H, 0.03 * H),
-    s: 1 + J.clamp((J.lerp(a.s, b.s, k) - 1) * st, 0, 0.08),
-    rot: J.clamp(J.lerp(a.rot, b.rot, k) * st, -1, 1),
+    x: J.clamp(J.lerp(a.x, b.x, k) * st, -0.10 * W, 0.10 * W),
+    y: J.clamp(J.lerp(a.y, b.y, k) * st, -0.07 * H, 0.07 * H),
+    s: 1 + J.clamp((J.lerp(a.s, b.s, k) - 1) * st, -0.03, 0.22),
+    rot: J.clamp(J.lerp(a.rot, b.rot, k) * st, -2.5, 2.5),
   };
 }
 J.gcamAt = gcamAt;
@@ -5051,8 +5051,19 @@ function applyGcam(ctx, W, H, g, f, cover) {
   const gx = g.x * f, gy = g.y * f, gr = g.rot * f;
   let gs = 1 + (g.s - 1) * f;
   if (cover) {
-    const need = (Math.abs(gx) + Math.abs(gy) + Math.abs(gr * J.DEG) * Math.hypot(W, H) * 0.5) / Math.min(W, H);
-    gs *= 1 + need + 0.004;
+    /* 端欠け防止に必要な最小スケールを厳密に求める: 画面四隅 q の逆像
+       p = 中心 + R(-θ)(q - 中心 - g) / S がソース矩形 [0,W]x[0,H] に収まる条件は
+       S >= |v.x|/(W/2) かつ S >= |v.y|/(H/2) (v = R(-θ)(q-中心-g))。
+       パン x±10% / 回転 ±2.5° / ズーム 0.97 の最悪条件でも四隅で担保される。
+       呼び出し側の描画はみ出し (bgM 等) は追加の安全マージンになる。 */
+    const th = gr * J.DEG, cos = Math.cos(th), sin = Math.sin(th);
+    let need = 1;
+    for (let ci = 0; ci < 4; ci++) {
+      const dx = (ci & 1 ? W : 0) - W / 2 - gx, dy = (ci & 2 ? H : 0) - H / 2 - gy;
+      const vx = cos * dx + sin * dy, vy = -sin * dx + cos * dy;
+      need = Math.max(need, Math.abs(vx) / (W / 2), Math.abs(vy) / (H / 2));
+    }
+    gs = Math.max(gs, need * 1.003);
   }
   if (!gx && !gy && gs === 1 && !gr) return;
   ctx.translate(W / 2 + gx, H / 2 + gy);
@@ -5259,9 +5270,9 @@ class Renderer {
       const cs = cam.s ?? 1;
       // 全体カメラ (2.5D): 既存カットカメラの外側に合成する。ゴーストパスは lag 時刻 tp で
       // 評価するので、残像はカメラ運動にも遅れて追随する。カットカメラとの合算ズームは
-      // 1.12 を上限にクランプ。帯 (centerFree) の中では係数を落として帯の前提を保つ。
+      // 1.35 を上限にクランプ。帯 (centerFree) の中では係数を落として帯の前提を保つ。
       const gp = gcamForCut(plan, tp, cut);
-      const gZoom = Math.min(gp.s, Math.max(1, 1.12 / Math.max(cs, 1e-3)));
+      const gZoom = Math.min(gp.s, Math.max(1, 1.35 / Math.max(cs, 1e-3)));
       applyGcam(X, W, H, { x: gp.x * (W / plan.W), y: gp.y * (H / plan.H), s: gZoom, rot: gp.rot }, Z ? 0.4 : 1);
       X.translate(W / 2 + shx + P.off[0] + (cam.x || 0), H / 2 + shy + P.off[1] + (cam.y || 0));
       if (cam.rot) X.rotate(cam.rot * J.DEG);
